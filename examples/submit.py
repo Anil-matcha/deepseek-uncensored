@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit to Muapi's standard or abliterated DeepSeek V4.1 Flash route."""
+"""Submit a prompt to a Muapi DeepSeek route and poll its result."""
 
 import argparse
 import json
@@ -11,79 +11,57 @@ import requests
 
 
 API_ROOT = "https://api.muapi.ai/api/v1"
+MODELS = {   'deepseek-v4-1-flash-abliterated': {   'image': False,
+                                           'thinking': True,
+                                           'max': 32768},
+    'deepseek-r1-llama-70b-abliterated': {   'image': False,
+                                             'thinking': False,
+                                             'max': 8192},
+    'deepseek-r1-qwen-32b-abliterated': {   'image': False,
+                                            'thinking': False,
+                                            'max': 8192}}
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("prompt", help="Prompt text to send")
-    parser.add_argument(
-        "--abliterated",
-        action="store_true",
-        help="Use the text-only abliterated endpoint",
-    )
-    parser.add_argument(
-        "--image-url",
-        help="Optional public image URL; standard route only",
-    )
-    parser.add_argument(
-        "--reasoning-effort",
-        choices=("none", "minimal", "low", "medium", "high", "xhigh", "max"),
-        default="medium",
-        help="Reasoning effort for the standard route",
-    )
-    parser.add_argument(
-        "--thinking",
-        action="store_true",
-        help="Enable extended thinking on the abliterated route",
-    )
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--model", choices=MODELS, default="deepseek-v4-1-flash-abliterated")
+    parser.add_argument("--system-prompt")
+    parser.add_argument("--max-tokens", type=int)
+    parser.add_argument("--thinking", action="store_true")
     args = parser.parse_args()
 
     api_key = os.environ.get("MUAPI_KEY")
     if not api_key:
         print("Set MUAPI_KEY before running this example.", file=sys.stderr)
         return 2
-    if args.abliterated and args.image_url:
-        parser.error("--image-url is available only on the standard route")
-    if args.abliterated and not 1 <= args.max_tokens <= 32768:
-        parser.error("--max-tokens must be between 1 and 32768")
 
-    if args.abliterated:
-        model = "deepseek-v4-1-flash-abliterated"
-        payload = {
-            "prompt": args.prompt,
-            "max_tokens": args.max_tokens,
-            "thinking": args.thinking,
-        }
-    else:
-        model = "deepseek-v4-1-flash"
-        payload = {
-            "prompt": args.prompt,
-            "reasoning_effort": args.reasoning_effort,
-        }
-        if args.image_url:
-            payload["image_url"] = args.image_url
-
+    meta = MODELS[args.model]
+    if args.max_tokens is not None and not 1 <= args.max_tokens <= meta["max"]:
+        parser.error(f"--max-tokens must be between 1 and {meta['max']} for {args.model}")
+    payload = {"prompt": args.prompt}
+    if args.system_prompt:
+        payload["system_prompt"] = args.system_prompt
+    if args.max_tokens is not None:
+        payload["max_tokens"] = args.max_tokens
+    if args.thinking:
+        if not meta["thinking"]:
+            parser.error(f"{args.model} does not list thinking in its current schema")
+        payload["thinking"] = True
     headers = {"x-api-key": api_key, "Content-Type": "application/json"}
-    response = requests.post(
-        f"{API_ROOT}/{model}",
-        headers=headers,
-        json=payload,
-        timeout=60,
-    )
+    response = requests.post(f"{API_ROOT}/{args.model}", headers=headers, json=payload, timeout=60)
     response.raise_for_status()
     submission = response.json()
     request_id = submission.get("request_id") or submission.get("id")
     if not request_id:
         print(json.dumps(submission, indent=2))
-        raise SystemExit("Muapi did not return a request_id.")
+        print("Muapi did not return a request_id.", file=sys.stderr)
+        return 1
 
-    print(f"Submitted {model} request {request_id}; polling for the result.")
+    print(f"Submitted {args.model} request {request_id}; polling for the result.")
     for _ in range(120):
         result_response = requests.get(
-            f"{API_ROOT}/predictions/{request_id}/result",
-            headers=headers,
-            timeout=30,
+            f"{API_ROOT}/predictions/{request_id}/result", headers=headers, timeout=30
         )
         result_response.raise_for_status()
         result = result_response.json()
